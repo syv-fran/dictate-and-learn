@@ -1,0 +1,34 @@
+[project]
+name = "dal"
+version = "0.1.0"
+dependencies = [
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "flask",
+    "flask-cors",
+    "rapidfuzz",
+    "panphon",
+    "flashlight-text",
+    "whisperx",
+    "ipywebrtc",
+    "phonemizer",
+    "piper-tts",
+    "lhotse"
+]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::UserWarning:torchaudio.functional._alignment",
+    "ignore::UserWarning:pyannote.audio.core.io",
+    "ignore::UserWarning:joblib._multiprocessing_helpers",
+    "ignore:.*forced_align has been deprecated.*:UserWarning"
+]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)s] (%(name)s) %(message)s"
+
+[tool.pytest_env]
+LOCAL_FILES_ONLY = "1"
+

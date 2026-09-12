@@ -1,10 +1,9 @@
 import heapq
+import logging
 import threading
 
 import phonemizer
 from rapidfuzz import fuzz
-
-import progresslog
 
 phonemizer_lock = threading.Lock()
 
@@ -163,7 +162,8 @@ def phonemize_words(listof3: list[str], lang: str) -> str:
     ):  # split with argument '\t' makes a trailing empty entry. Delete it.
         phnlist.pop()
     if len(phnlist) != word_count_sum:
-        progresslog.get().info(
+        logger=logging.getLogger("DAL")
+        logger.info(
             "warning, word counts %d, %d do not match for %s %s, backing off",
             word_count_sum,
             len(phnlist),
@@ -222,7 +222,8 @@ def split_by_fuzzy_match(
             idx -= 1
         if target_end_idx == None:  # disastrous matching fail?
             target_end_idx = len(words) - 1  # perhaps user only spoke seg not sentence.
-            progresslog.get().info("Could not match sentence")
+            logger=logging.getLogger("DAL")
+            logger.info("Could not match sentence")
         end = words[target_end_idx]["end"]
         print(f"seg is between {target_start_idx} and {target_end_idx} in {words}")
     return start, end

@@ -1,4 +1,5 @@
 import { fileURLToPath, URL } from 'node:url'
+import path from 'node:path'
 
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue';
@@ -11,14 +12,18 @@ export default defineConfig(({ mode }) => ({
   plugins: [
     vue(), 
     vueDevTools(),
-    {
-      name: 'tar-gz',
-      apply: 'build', //production build?  make tgz ready to copy out of container
-      closeBundle() {
-        execSync('tar -czf dist.tar.gz -C dist .');
+  ],
+  build: {
+    outDir: path.resolve(__dirname, '../backend/static'),
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        entryFileNames: '[name]-[hash].js',
+        chunkFileNames: '[name]-[hash].js',
+        assetFileNames: '[name]-[hash].[ext]'
       }
     }
-  ],
+  },
 
   resolve: {
     alias: {

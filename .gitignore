@@ -21,7 +21,7 @@ logs/
 *.wav
 *.mp3
 *.m4a
-flask/static/
+backend/static/
 vuejs/README.md
 vuejs/eslint.config.js
 vuejs/public/

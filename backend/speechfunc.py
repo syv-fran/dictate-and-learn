@@ -137,7 +137,7 @@ def raw_recog_beam(
             "unk_word": "<unk>",
         }
         # constructing decoder each time is inefficent but fine for experiments.
-        beam_decoder: torchaudio.models.decoder.CTCDecoder = ctc_decoder(decoder_params)  # type:ignore
+        beam_decoder: torchaudio.models.decoder.CTCDecoder = ctc_decoder(**decoder_params)  # type:ignore
         hypothesis = beam_decoder(emissions)
         tokens = hypothesis[0][0].tokens
         text = pa.tokenizer.decode(tokens)

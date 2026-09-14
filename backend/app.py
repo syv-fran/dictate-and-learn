@@ -14,6 +14,7 @@ warnings.filterwarnings(
     module="pyannote.audio.core.io"
 )
 import csv
+import html
 import os
 import threading
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 from piper import PiperVoice as TTSVoice  # currently using Piper as TTS, could change.
 from werkzeug.utils import secure_filename
+from whisperx.audio import SAMPLE_RATE
 
 from . import progresslog, speechfunc, tts, words
 
@@ -107,7 +109,8 @@ def recognize(audio_filename: str, selected_lang: str, model_name: str, was_pres
         state.audio = audio = whisperx.load_audio(audio_filename)
 
         logger.info("About to transcribe with %s %s", model_name,selected_lang)
-        initial_result = model.transcribe(audio, language=selected_lang,task='transcribe') 
+        initial_result = model.transcribe(audio, language=selected_lang,task='transcribe')
+        initial_result=clamp_end(initial_result,audio) 
         # before alignment
         state.lang = lang = initial_result["language"]
         if not selected_lang:
@@ -211,7 +214,9 @@ def emissions_using_state(start: float, end: float,use_retry:bool) ->torch.Tenso
 # Tell the client that there is data available, store data thread-safely.
 def signal_server_results( wordlist:list[dict], lang:str, is_partial:bool):    
     global recog_result
-    recog_result = {"is_partial": is_partial, "words": wordlist, "lang": lang}
+   
+    clean_words =  [ {**d, "word": html.escape(d["word"])} for d in wordlist ]
+    recog_result = {"is_partial": is_partial, "words": clean_words, "lang": html.escape(lang)}
     logger.critical("PARTIAL" if is_partial else "READY")    
 
 #Do recognition of audio file, signal results, then continue to prep for future work
@@ -315,6 +320,13 @@ def get_recog():
         return {"error": "Processing incomplete"}, 404
     return recog_result
 
+def clamp_end(result,audio):
+    last=result['segments'][-1]
+    true_end=len(audio)/float(SAMPLE_RATE)
+    print(true_end)
+    last['end'] = min(last['end'], true_end)
+    return result
+    
 @app.route("/retry", methods=['POST']) # API call
 def retry_segment():
     is_sentence=get_form_bool("is_sentence",True)
@@ -352,6 +364,7 @@ def retry_segment():
 
     state.retry_audio=audio
     initial_result=state.model.transcribe(audio, language=state.lang,task='transcribe')
+    initial_result=clamp_end(initial_result,audio)
     whisper_result = whisperx.align(
             initial_result["segments"], 
             state.word_align_model,

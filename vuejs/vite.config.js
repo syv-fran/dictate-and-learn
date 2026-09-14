@@ -15,15 +15,8 @@ export default defineConfig(({ mode }) => ({
   ],
   build: {
     outDir: path.resolve(__dirname, '../backend/static'),
-    emptyOutDir: true,
-    rollupOptions: {
-      output: {
-        entryFileNames: '[name]-[hash].js',
-        chunkFileNames: '[name]-[hash].js',
-        assetFileNames: '[name]-[hash].[ext]'
-      }
-    }
-  },
+    emptyOutDir: false,
+  }, 
 
   resolve: {
     alias: {

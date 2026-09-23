@@ -6,6 +6,7 @@ import { findIconDefinition } from '@fortawesome/fontawesome-svg-core';
 const APIHOST= import.meta.env.VITE_APP_HOSTNAME || 'http://localhost:5000';
 const PRESETFILE = "preset.mp3" 
 
+const PHONWIDTH = 60 // multiplier for column widths (rem-per-second) - smallest column 1/50th second.
 const mainRecorder = ref({ 
   isAudioAvail: false, // convenience booleans for UI
   isRecordingNow: false, 
@@ -30,6 +31,7 @@ const messages = ref([]);
 const wordsList = ref([]);
 const currentSeg = ref({ text: "", start: 0, end: 0, audio: null, more: false, isRetry: false })
 const correctText = ref("");
+const tips = ref ([]);
 
 const pho = ref({ active: -1, nButtons: 0, info: "", text: "", list: [], playerID: "phoID.AudioPlayer" })
 const corr = ref({ active: -1, nButtons: 0, info: "", text: "", list: [], playerID: "corrID.AudioPlayer" })
@@ -39,6 +41,7 @@ const suffix = ref(''); // could move into currentSeg structure, though we don't
 const onlyPartialWords = ref(false);
 const isAnalyzing = ref(false);
 const isRecognizing = ref(false);
+
 const checked = ref(false); // just for testing.
 const radioFullSentence = ref(false); // status of radio buttons
 
@@ -52,6 +55,7 @@ let currentSent = -1;
 let infoDictionary = null;
 let _langReturned = null;
 let progressSource = null;
+
 
 function playAudioInside(event) {
   try {
@@ -75,7 +79,7 @@ function linkSynthAudio(phones, location) {
   const audioData = document.getElementById(location);
   audioData.preload = 'none';
   audioData.src = `${APIHOST}/robot?phones=${encodeURIComponent(phones)}`;
-  audioData.controls = false;
+ // audioData.controls = false;
 }
 
 function soundPause(recorder) {
@@ -86,9 +90,9 @@ function soundPause(recorder) {
 
 function soundStop(recorder) {
   //TODO: fix this!
-//  if (recorder.mediaRecorder.stream) {
-//    stream.getTracks().forEach(track => track.stop()); // just to kill browser icon
-//  }
+  if (recorder.mediaRecorder.stream) {
+    stream.getTracks().forEach(track => track.stop()); // just to kill browser icon
+  }
   recorder.isRecordingPaused = false;
   recorder.isRecordingNow = false;
   recorder.isAudioAvail = true;
@@ -133,7 +137,7 @@ async function soundRecord(recorder) {
       const e = document.getElementById(recorder.element);
       e.src = URL.createObjectURL(recorder.blob);
       //TODO: is turning controls on/off even necessary? we switch display on off
-      if (recorder == mainRecorder.value) { e.controls = true; }
+      // if (recorder == mainRecorder.value) { e.controls = true; }
     });
     recorder.mediaRecorder.start();
   } catch (error) {
@@ -151,14 +155,14 @@ function clearAudio(recorder) {
     } // segAudioPlayer could have been attached to either recorder.
     a.removeAttribute('src');
   }
-  recorder.isAudioAvail = false;
-  recorder.isRecordingPaused = false;
-  recorder.blob = null;
-  recorder.audioChunks = [];
   if (recorder.mediaRecorder) {
     soundStop(recorder);
     recorder.mediaRecorder = null;
   }
+  recorder.isAudioAvail = false;
+  recorder.isRecordingPaused = false;
+  recorder.blob = null;
+  recorder.audioChunks = [];
 }
 
 function wordListReset() {
@@ -174,6 +178,10 @@ function addMessage(data) {
     messages.value.shift();
   }
   messages.value.push(data);
+  if (data.includes("ERROR")) {
+    isRecognizing.value=false;
+    isAnalyzing.value = false;
+  }
   nextTick(() => {
     scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight;
   });
@@ -195,15 +203,20 @@ function AwaitLogInit() {
           if (!resp.ok) {throw new Error(`Recognition failure: ${resp.status} ${resp.statusText}`);}
           const result = await resp.json();
           onlyPartialWords.value = result.is_partial;
-          if (!result.is_partial) {isRecognizing.value=false;}
+          if (event.data.includes("COMPLETE")) {
+            isRecognizing.value=false;
+          }
           makeWordList(result);
         } catch (error) {
+          isRecognizing.value = false;
           addMessage(error.message);
         }
       }
     };
     progressSource.onerror = () => {
       addMessage(`Log error - is server ${APIHOST} running?`);
+      isRecognizing.value=false;
+      isAnalyzing.value = false;
       reject(new Error("Connection to server logger failed"));
     };
   }
@@ -235,19 +248,21 @@ async function doRecog() {
   } catch (error) { addMessage(`Error submitting recognition: ${error.message}`) }
 }
 
+// called by button, runs recognition with audio already on server.
 async function makePreset() {
   try {
+    const presetPath= `${APIHOST}/static/${PRESETFILE}`
     const e = document.getElementById(mainRecorder.value.element);
-  
-  clearAudio(mainRecorder.value);
-  //TODO: if there is Audio that is not a Preset, ask for permission first.
-
-
-  e.src = `${APIHOST}/static/${PRESETFILE}`;
-  e.preload='metadata';
-  mainRecorder.value.controls = true;
-  mainRecorder.value.isAudioAvail = true;
-  await doRecog();
+    if (mainRecorder.value.isAudioAvail && e.src!=presetPath) {
+      const ok = confirm("Clear existing recording?");
+      if (!ok) { return; }
+    }
+    clearAudio(mainRecorder.value);
+    e.src =presetPath ;
+    e.preload='metadata';
+    //mainRecorder.value.controls = true;
+    mainRecorder.value.isAudioAvail = true;
+    await doRecog();
   } catch (error) { addMessage("error with preset:" + error.message) }
 }
  
@@ -256,14 +271,13 @@ function makeWordList(result) {
   // if result has the same text as before (old could have been partial result) just update with new info.
   // otherwise, make new list, unselected hence currentSeg will be the empty segment.
   if (wordsList.value.length == result.words.length && 
-      wordsList.value.every((item, index) => item.text == result.words[index].text)) {
+      wordsList.value.every((item, index) => item.text == result.words[index].word)) {
         wordsList.value.forEach((item,idx,array) => {
-          array[idx].sent = result.words[idx].sent;
+          array[idx].sent = result.words[idx].sent;  
           array[idx].start=result.words[idx].start || 0;
           array[idx].end=result.words[idx].end || 0;
           array[idx].unlikely=result.words[idx].unlikely || 0;
-        });  
-        addMessage("Merging word lists")       
+        });       
       } 
   else {
   wordsList.value = result.words.map(obj => ({
@@ -276,7 +290,7 @@ function makeWordList(result) {
     active: 0,
     disabled: 0,
     correction: '',
-  }));
+  })); 
   }
   segAudioPlayer.value.src = RecAudioPlayer.value.src; // js passes strings by VALUE, don't forget!
   initDynamicClip(segAudioPlayer.value); //TODO: investigate init methods, remove this call.
@@ -438,8 +452,7 @@ async function callAnalyze(text, l) {
   }
   const r = await fetch(url);
   if (!r.ok) {
-    addMessage("ERROR: analysis returned " + r.status);
-    return null;  
+    throw new Error(`problem loading analysis: ${r.status} ${r.statusText}`);
   } 
   const data = await r.json(); // currently receive a dict: list=,phones=..
   l.value.list = data.list.map(mapBricks);
@@ -450,6 +463,7 @@ async function callAnalyze(text, l) {
 
 async function getLetters() {
   try { // catch errors as this is top level call
+    let data2;
     isAnalyzing.value=true;
     prefix.value = wordsBeforeStart(currentSeg.value.start, currentSent);
     suffix.value = wordsAtEnd(currentSeg.value.end, currentSent); // could even move this logic earlier.
@@ -458,34 +472,44 @@ async function getLetters() {
       updateSeg();
     }
 
-    const _data = await callAnalyze(currentSeg.value.text, pho);
+    const data = await callAnalyze(currentSeg.value.text, pho);
     pho.value.text = currentSeg.value.text;
 
     if (correctText.value) {
-      const _data2 = await callAnalyze(correctText.value, corr)
+      data2 = await callAnalyze(correctText.value, corr)
     }
-    else {
-      corr.value.list = []
+    else { 
+      corr.value.list = data2 = []
     }
     corr.value.text = correctText.value;
 
     const data3 = await callAnalyze("", raw);
     raw.value.text = data3.phones;
-
+       
     if (!infoDictionary) {
       const response = await fetch(`${APIHOST}/phoneme_info`)
       if (!response.ok) {
-        throw new Error(`problem loading info: ${response.status} ${response.statusText}`);
+        throw new Error(`problem loading phoneme info: ${response.status} ${response.statusText}`);
       }
-      infoDictionary = await response.json();
+      infoDictionary = await response.json();   
     }
+    const content= {best:data.list, corr: data2.list, raw: data3.list};
+    const r = await fetch( `${APIHOST}/tips`, {
+      method:'POST', 
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(content)
+    });
+    if (!r.ok) {throw new Error ("no tips available.");}
+    tips.value= await r.json(); 
   }
   catch (error) {
-    addMessage(error.message);
+    addMessage(error.message+" during analysis");
   }
   finally {
     isAnalyzing.value = false;
-  }
+  } 
 }
 
 async function callRetry() {
@@ -547,7 +571,7 @@ function linkDictionary(ph, index, struct, idPrefix) {
     e = document.getElementById(idPrefix + ".WAudio" + String(i + 1));
     e.preload = 'none';
     e.src = array[i];
-    e.controls = false;
+    //e.controls = false;
   }
   struct.active = index;
   struct.info = "Phoneme " + ph + ": " + infoDictionary[ph][2];
@@ -560,7 +584,7 @@ function linkDictionary(ph, index, struct, idPrefix) {
   <div class="bg-white rounded-3 border border-2 border-slate-200 shadow-sm ">
     <div class="container text-center justify-content-center">
       <h2 class="text-center">
-        Record Audio.
+        Record Audio 
       </h2>
       <div class="row pb-1 justify-content-center">
         <div class="col-auto">
@@ -684,12 +708,13 @@ function linkDictionary(ph, index, struct, idPrefix) {
         <font-awesome-icon icon="circle-play" /> <audio id="phoID.AudioPlayer"></audio> Synth
       </button>
     </div>
-    <div class="container d-flex">
-      <div v-for="(l, index) in pho.list" :key="`ph-${index}`" class="col myletter" :style="{ 'flex-grow': l.width }"
+    <div class="container phon-row">
+      <div v-for="(l, index) in pho.list" :key="`ph-${index}`" class="col myletter" 
+       :style="{ 'flex': ' 0 0 ' + l.width * PHONWIDTH + 'rem' }"
         @click.stop="pho = linkDictionary(l.text, index, pho, 'phoID')">
         <div v-for="(brick, index2) in l.bricks" :key="`ph-${index}-${index2}`" class="row" :class="brick">
         </div>
-        <div :class="index == pho.active ? 'myphoneme-active' : 'myphoneme'">
+        <div :class="index == pho.active ? 'myphoneme-active' : l.text == '' ? 'myphoneme-blank' : 'myphoneme'">
           {{ l.text }}
         </div>
       </div> 
@@ -721,14 +746,15 @@ function linkDictionary(ph, index, struct, idPrefix) {
           <font-awesome-icon icon="circle-play" /> <audio id="corrID.AudioPlayer"> </audio>Synth
         </button>
       </div>
-      <div class="container d-flex">
-        <div v-for="(l, index) in corr.list" :key="`cor-${index}`" class="col myletter"
-          :style="{ 'flex-grow': l.width }" @click.stop="corr = linkDictionary(l.text, index, corr, 'corrID')">
+      <div class="container phon-row">
+        <div v-for="(l, index) in corr.list" :key="`cor-${index}`" 
+          class="col myletter"
+          :style="{'flex': ' 0 0 ' + l.width * PHONWIDTH +'rem' } " @click.stop="corr = linkDictionary(l.text, index, corr, 'corrID')">
           <div v-for="(brick, index2) in l.bricks" :key="`cor-${index}-${index2}`" class="row" :class="brick">
           </div>
-          <div :class="index == corr.active ? 'myphoneme-active' : 'myphoneme'">
+          <div :class="index == corr.active ? 'myphoneme-active' : l.text == '' ? 'myphoneme-blank' : 'myphoneme'">
             {{ l.text }}
-          </div>
+          </div> 
         </div>
       </div>
       <div v-show="corr.active >= 0" @click.stop="">
@@ -758,8 +784,9 @@ function linkDictionary(ph, index, struct, idPrefix) {
           <font-awesome-icon icon="circle-play" /> <audio id="rawID.AudioPlayer"> </audio>Synth
         </button>
       </div>
-      <div class="container d-flex flex-wrap">
-        <div v-for="(l, index) in raw.list" :key="`raw-${index}`" class="col myletter" :style="{ 'flex-grow': l.width }"
+      <div class="container phon-row">
+        <div v-for="(l, index) in raw.list" :key="`raw-${index}`" class="col myletter" 
+          :style="{'flex': ' 0 0 ' + l.width * PHONWIDTH +'rem' } "
           @click.stop="linkDictionary(l.text, index, raw, 'rawID')">
           <div v-for="(brick, index2) in l.bricks" :key="`raw-${index}-${index2}`" class="row" :class="brick">
           </div>
@@ -787,8 +814,12 @@ function linkDictionary(ph, index, struct, idPrefix) {
         </div>
       </div>
     </div>
+  <!--- TIPS -->
+    <div v-for="(tip, index) in tips" :key="`tip-${index}`">
+      {{tip}}
+    </div>
   </div>
-  <!--TODO: TIPS GO HERE-->
+ 
   <!--TODO: RERECORD PANEL-->
   <div v-show="corr.text != ''" class="bg-white rounded-3 border border-2 border-slate-200 p-3 shadow-sm">
     <div class="d-flex align-items-start justify-content-between rounded bg-white">
@@ -944,12 +975,14 @@ body {
   border-style: solid;
   border-color: #e2e8f0;
   font-weight: bold;
+    margin: 2px;
 }
 
 .myphoneme-blank {
   background-color: white;
   border-style: solid;
   border-color: white;
+    margin: 2px;
 }
 
 .myphoneme-active {
@@ -958,21 +991,25 @@ body {
   border-color: #303030;
   text-align: center;
   font-weight: bold;
+    margin: 2px;
 }
 
 .myphoneme:hover {
   background-color: #adb0b4;
-
+  margin: 2px;
 }
 
 .myletter {
-  margin: 2px;
-  flex-basis: auto;
-  flex-shrink: 1;
-  width: auto;
+  min-width:0;
+  overflow:hidden;
 }
 
-
+.phon-row {
+    display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-start;
+      width: 100%;
+}
 .indicator-dot-active {
   background-color: #10b981 !important;
   box-shadow: 0 0 6px rgba(16, 185, 129, 0.9);

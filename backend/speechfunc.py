@@ -35,10 +35,13 @@ def load_phone_aligner(model_dir: str, local_only: bool, device: str) -> PhoneAl
     print(f" {p_tokenizer} ")
     sample_rate = feature_extractor.sampling_rate
     stride_samples = p_model.config.inputs_to_logits_ratio
-    return PhoneAligner(model=p_model, tokenizer=p_tokenizer, 
-                        sample_rate=sample_rate,
-                        frame_duration= stride_samples / sample_rate,
-                        device=device)
+    return PhoneAligner(
+        p_model,
+        p_tokenizer,
+        sample_rate,
+        stride_samples / sample_rate,
+        device,
+    )
 
 
 def tokenpath_to_spans(
@@ -159,17 +162,7 @@ def raw_recog(
     phones = ""
     for x in greedy_chars:
         phones += x["text"]
-    if greedy_chars and greedy_chars[0]["start"] > start_offset:
-        greedy_chars.insert(
-            0, # insert blank at start of list
-            {
-                "text": "",
-                "start": start_offset,
-                "end": greedy_chars[0]["start"],
-                "score": 0,
-            },
-        )
-    return greedy_chars, phones
+    return pad_start(greedy_chars,start_offset), phones
 
 #using the emissions of the phone model, return times and scores for
 #each phone in the string given.
@@ -207,10 +200,24 @@ def phone_align(
         aligned_tokens, scores = torchaudio.functional.forced_align(logprobs, targets)
         scores: torch.Tensor = scores.exp()  # convert back to probability
 
-
-    return tokenpath_to_spans(
+    t= tokenpath_to_spans(
         aligned_tokens[0], scores[0],pa, start_time_offset
     )
+    return pad_start(t,start_time_offset)
+
+def pad_start(t:list,start_offset:float):
+    if (t and t[0] and t[0]['start'] > start_offset):
+        t.insert(
+            0, # insert blank at start of list
+            {
+                "text": "",
+                "start": start_offset,
+                "end": t[0]["start"],
+                "score": 0,
+            },
+        )
+    return t
+
 
 #Use new audio segment to construct and return one sentence's worth of audio, and its length.
 #if is_sentence is true, this is trivially the new segment provided.

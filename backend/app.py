@@ -2,20 +2,25 @@
 import warnings
 
 warnings.filterwarnings(
-    "ignore", 
+    "ignore",  #Ignore warnings about torchaudio compatibility: not used
     category=UserWarning, 
-    message=r"(?s).*torchcodec is not installed correctly.*"
+    message=r"(?s).*torchcodec.*"
 )
 
-# Alternative: Ignore all UserWarnings coming from the specific pyannote module path
 warnings.filterwarnings(
-    "ignore", 
-    category=UserWarning, 
-    module="pyannote.audio.core.io"
+    "ignore",  # Ignore "deprecated" warnings for torch: 2.8.0 is required by whisperx
+    category=UserWarning,
+    message=r"(?s).*torchalign.*deprecated.*",
+)
+warnings.filterwarnings(
+    "ignore",  # ignore pyannote warnings: diarization not used
+    category=UserWarning,
+    module="pyannote.audio.core.io",
 )
 import csv
 import html
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,11 +29,12 @@ import huggingface_hub  # needed for exception handling
 import numpy as np
 import torch
 import whisperx
-from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 from piper import PiperVoice as TTSVoice  # currently using Piper as TTS, could change.
 from werkzeug.utils import secure_filename
 from whisperx.audio import SAMPLE_RATE
+
+from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 from . import progresslog, speechfunc, tts, words
 
@@ -50,7 +56,6 @@ class RecogState: #this is the state of the current recognition task, shared bet
     model = None
     model_name: str | None = None
     retry_audio: np.ndarray | None  = None
-    selected_lang: str = ""
     sentence_idx: list[int] | None = None
     voice: TTSVoice | None = None
     voice_lang: str = ""
@@ -65,9 +70,10 @@ class RecogState: #this is the state of the current recognition task, shared bet
 class GlobalState: 
     # - global locks for functions which aren't thread-safe
     # - anything constant, but loaded lazily.
+    phonemes:dict = field(default_factory=dict)
     voice_lock: threading.Lock = field(default_factory=threading.Lock)
     phone_aligner: speechfunc.PhoneAligner | None = None
-    phone_align_lock: threading.Lock = field(default_factory=threading.Lock)
+    model_load_lock: threading.Lock = field(default_factory=threading.Lock)
 
 # instantiate the app, for decorators:
 app = Flask(__name__)
@@ -85,45 +91,13 @@ def get_form_bool(field_name: str, default: bool) -> bool:
         return default
     return value.lower() in ("true", "1", "on", "yes", "enabled")
 
-# Two-stage speech recognition process using whisperx and potentially saved state
-def recognize(audio_filename: str, selected_lang: str, model_name: str, was_preset:bool = False):
-    try:
-        if model_name == state.model_name and state.model is not None:
-            logger.info("using existing model")
-            model=state.model
-        else:        
-            model_name = secure_filename(model_name) # sadly prevents us passing custom model.
-            logger.info("Loading %s", model_name)
-            state.model = model = whisperx.load_model(
-                model_name,
-                device=accel_device,
-                compute_type="default",
-                download_root=model_dir,
-                language=selected_lang if selected_lang else None,
-                local_files_only=local_files_only,
-            )     
-            logger.info("Loaded %s", model_name)
-            state.model_name = model_name
+def ensure_align_model_loaded(lang:str):
 
-        state.selected_lang = selected_lang
-        state.audio = audio = whisperx.load_audio(audio_filename)
-
-        logger.info("About to transcribe with %s %s", model_name,selected_lang)
-        initial_result = model.transcribe(audio, language=selected_lang,task='transcribe')
-        initial_result=clamp_end(initial_result,audio) 
-        # before alignment
-        state.lang = lang = initial_result["language"]
-        if not selected_lang:
-            logger.info("Language: %s", lang) # todo: display parsed language id at top of wordlist?
-        logger.info("Text: %s ...", words.prettify_head(initial_result))
-        r=words.make_partial_resultlist(initial_result['segments'])
-        if not was_preset:
-            signal_server_results(r, lang, is_partial=True)
-
-        if state.word_align_model is not None and state.word_align_lang == lang:
-            logger.debug("Using existing word alignment model")
-        else:
-            logger.info("Loading alignment model")
+    if state.word_align_model is not None and state.word_align_lang == lang:
+        logger.debug("Using existing word alignment model")
+    else:
+        logger.info("Loading alignment model")
+        with global_state.model_load_lock:
             state.word_align_model, state.word_align_meta = whisperx.load_align_model(
                 language_code=lang,
                 model_name=custom_alignment_model_name,
@@ -131,41 +105,67 @@ def recognize(audio_filename: str, selected_lang: str, model_name: str, was_pres
                 device=accel_device,
                 model_cache_only=local_files_only,
             )
-            state.word_align_lang = lang
+        state.word_align_lang = lang
+    return state.word_align_model, state.word_align_meta
 
-        logger.info("Preparing to align words.")
-        whisper_result = whisperx.align(
-            initial_result["segments"],
-            state.word_align_model,
-            state.word_align_meta,
-            audio,
-            accel_device,
-            return_char_alignments=False,
-        )
-        state.sentence_idx, state.words = words.make_words_list(whisper_result["segments"])
-        words.mark_unlikely(state.words)
-        print(state.words)
-        return state.words, lang
-    except huggingface_hub.errors.LocalEntryNotFoundError:
-            logger.error(
-                "ERROR: Cannot load speech model %s locally. Download it separately, or unset variable LOCAL_FILES_ONLY to try to get it on demand. ",
+def ensure_whisper_model_loaded(model_name:str,selected_lang:str|None): 
+    if model_name == state.model_name and state.model is not None:
+        logger.info("using existing model")
+    else:        
+        model_name = secure_filename(model_name) # sadly prevents us passing custom model.
+        logger.info("Loading %s", model_name)
+        with global_state.model_load_lock:
+            state.model = whisperx.load_model(
                 model_name,
-            )
-    except (
-            huggingface_hub.errors.EntryNotFoundError,
-            huggingface_hub.errors.RepositoryNotFoundError,
-            OSError,
-            RuntimeError,
-            ValueError,
-        ) as e:
-            logger.error("ERROR: Speech model - %s", e)
-    return [],''
+                device=accel_device,
+                compute_type="int8",
+                download_root=model_dir,
+                language=selected_lang if selected_lang else None,
+                local_files_only=local_files_only,
+            )     
+        logger.info("Loaded %s", model_name)
+        state.model_name = model_name
+    return state.model
+
+# Two-stage speech recognition process using whisperx and potentially saved state
+def recognize(audio_fname: str, selected_lang: str, model_name: str, was_preset:bool = False):
+
+    model=ensure_whisper_model_loaded(model_name,selected_lang) 
+    state.audio = whisperx.load_audio(audio_fname)
+
+    logger.info("About to transcribe with %s %s", model_name,selected_lang)
+    initial_result = model.transcribe(state.audio, language=selected_lang,task='transcribe')
+    initial_result = clamp_end(initial_result,state.audio) 
+    # before alignment
+    state.lang = initial_result["language"]
+    if not selected_lang:
+        logger.info("Language: %s", state.lang)
+    logger.info("Text: %s ...", words.prettify_head(initial_result))
+    r=words.make_partial_resultlist(initial_result['segments'])
+    if not was_preset:
+        signal_server_results(r, state.lang)
+    _,_=ensure_align_model_loaded(state.lang)
+
+    logger.info("Preparing to align words.")
+    whisper_result = whisperx.align(
+        initial_result["segments"],
+        state.word_align_model,
+        state.word_align_meta,
+        state.audio,
+        accel_device,
+        return_char_alignments=False,
+    )
+    state.sentence_idx, state.words = words.make_words_list(whisper_result["segments"])
+    words.mark_unlikely(state.words)
+    # print(state.words,file=sys.stderr)
+    return state.words, state.lang
+
 
 # phone_aligner is the phoneme speech model. It is a constant, but loaded on demand.
 # we lock inside this fn so we don't try to load when mid-load.
 # TODO: try/except for fatal error for no phone aligner?
 def ensure_phone_aligner() -> speechfunc.PhoneAligner:
-    with global_state.phone_align_lock:
+    with global_state.model_load_lock:
         if global_state.phone_aligner is None:
             global_state.phone_aligner = speechfunc.load_phone_aligner(
                 model_dir, local_files_only, accel_device
@@ -212,32 +212,45 @@ def emissions_using_state(start: float, end: float,use_retry:bool) ->torch.Tenso
     return tensor_emissions
 
 # Tell the client that there is data available, store data thread-safely.
-def signal_server_results( wordlist:list[dict], lang:str, is_partial:bool):    
+# three states: PARTIAL (only words) READY ANALYSIS (timings of words) READY COMPLETE (scores)
+def signal_server_results( wordlist:list[dict], lang:str):    
     global recog_result
-   
+    is_partial=wordlist[0] and not "start" in wordlist[0]
+    is_complete=not wordlist or "unlikely" in wordlist[0]
     clean_words =  [ {**d, "word": html.escape(d["word"])} for d in wordlist ]
     recog_result = {"is_partial": is_partial, "words": clean_words, "lang": html.escape(lang)}
-    logger.critical("PARTIAL" if is_partial else "READY")    
+    logger.critical("PARTIAL" if is_partial else "READY COMPLETE" if is_complete else "READY ANALYSIS")    
 
-#Do recognition of audio file, signal results, then continue to prep for future work
+# Do recognition of audio file, signal results, then continue to prep for future work
 def blocking_recognition_task(filename:str, selected_lang:str, model, was_preset=False):
+    try:
+        #the time consuming part...
+        wordlist, lang = recognize(filename, selected_lang, model, was_preset)
+        state.recognition_is_ready.set()
+        signal_server_results(wordlist, lang)
 
-    wordlist, lang = recognize(filename, selected_lang, model, was_preset) # time-consuming
-    state.recognition_is_ready.set()
-    signal_server_results(wordlist, lang,is_partial=False)
+        # now load models in advance for next stage.
+        global_state.phone_aligner=ensure_phone_aligner()
+        # ..  But not if we're still using a different voice, already loading, or super busy.
+        if global_state.voice_lock.acquire(timeout=1):
+            try:
+                ensure_matching_voice()
+            finally:
+                global_state.voice_lock.release()
 
-    # now load models in advance for next stage.
-    global_state.phone_aligner=ensure_phone_aligner()
-    # ..  But not if we're still using a different voice, already loading, or super busy.
-    if global_state.voice_lock.acquire(timeout=1):
-        try:
-            ensure_matching_voice()
-        finally:
-            global_state.voice_lock.release()
-        
+    except huggingface_hub.errors.LocalEntryNotFoundError:
+                logger.error(
+                    f"ERROR: Cannot load speech model {model} locally. Download it separately, or unset variable LOCAL_FILES_ONLY to try to get it on demand. ",
+                )
+    except (
+                huggingface_hub.errors.EntryNotFoundError,
+                huggingface_hub.errors.RepositoryNotFoundError,
+                OSError,
+                RuntimeError,
+                ValueError,
+            ) as e:
+                logger.error(f"ERROR: Speech model - {e}")      
 
-def to_list(x:dict): #for each phoneme, record its text, score and length
-    return [x["text"], round(x["score"] * 5,3), x["end"] - x["start"]]
 
 
 @app.route("/start_recog", methods=["POST"])
@@ -267,9 +280,7 @@ def start_recog_task():
         if not lang:
            state.lang = lang = "pt"
         logger.info("Using preset text.")
-        # although we haven't finished, preset has enough info for READY because 
-        # it contains timing data, hence is_partial==False
-        signal_server_results(words.wordlist, lang,is_partial=False)
+        signal_server_results(words.wordlist, lang)
 
     logger.info("Starting recognition with model: %s, %s", model, filename)
 
@@ -323,7 +334,6 @@ def get_recog():
 def clamp_end(result,audio):
     last=result['segments'][-1]
     true_end=len(audio)/float(SAMPLE_RATE)
-    print(true_end)
     last['end'] = min(last['end'], true_end)
     return result
     
@@ -354,13 +364,13 @@ def retry_segment():
     sent_start, sent_end = words.get_sent_bounds(
             sent, state.sentence_idx, state.words
     ) 
-    print(f" {sent_start=} {sent_end=} {orig_seg_start=} {orig_seg_end=} ")   
+    print(f" {sent_start=} {sent_end=} {orig_seg_start=} {orig_seg_end=} ",file=sys.stderr)   
 
     audio, size_received = speechfunc.construct_retry_audio(
         audio_in_array,is_sentence,
         sent_start,sent_end,orig_seg_start,orig_seg_end,
         state.audio,global_state.phone_aligner.frame_duration)
-    print(f" {size_received=} ")
+    print(f" {size_received=} ",file=sys.stderr)
 
     state.retry_audio=audio
     initial_result=state.model.transcribe(audio, language=state.lang,task='transcribe')
@@ -442,9 +452,9 @@ def letter_list():
         result = speechfunc.phone_align(
             start, phones, global_state.phone_aligner, emissions
         )
-    print(result)
+    app.logger.info(result)
 
-    num_list = list(map(to_list, result))
+    num_list = list(map(words.to_basiclist, result))
     return jsonify( #previously prefix and suffix.
         {"list": num_list, "phones": phones}
     )
@@ -454,8 +464,21 @@ def get_phoneme_info():
     base_dir = Path(__file__).resolve().parent # directory containing this code
     with open( base_dir / "ipa.tsv", mode="r") as infile:
         reader = csv.reader(infile, delimiter="\t")
-        tsv = {rows[0]: [rows[1], rows[2], rows[3]] for rows in reader}
-    return jsonify(tsv)
+        global_state.phonemes = {rows[0]: [rows[1], rows[2], rows[3]] for rows in reader}
+    return jsonify(global_state.phonemes)
+
+@app.route("/tips", methods=["POST"])
+def get_tips():
+    payload = request.get_json() 
+    corr:list = words.unpack_phonlist(payload.get("corr", []))
+    best:list = words.unpack_phonlist(payload.get("best",[]))
+    raw:list = words.unpack_phonlist(payload.get("raw",[]))
+    if not best or (not corr and not raw): 
+            abort(400, description="JSON body must include 'best', and 1+ 'corr' and 'raw'.")
+    if not global_state.phonemes:
+        get_phoneme_info()
+    tips= words.create_tips(corr, best, raw, global_state.phonemes)
+    return jsonify(tips)
 
 @app.route("/")
 @app.route("/static/")
@@ -494,7 +517,7 @@ model_dir = os.getenv(
 accel_device = os.getenv('TORCH_DEVICE',"cpu") 
 
 #Set DAL_DEV to enable CORS for development build: 5173 is a dev Vite server for the js
-if get_env_bool('DAL_DEV', default=True):
+if get_env_bool('DAL_DEV', default=False):
     CORS(
         app,
         origins=["http://localhost:5173"],

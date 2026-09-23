@@ -1,6 +1,7 @@
 import io
 import logging
 import queue
+import sys
 import threading
 import time
 
@@ -46,7 +47,7 @@ def make_queue(logger):
             while True:
                 try:
                     log_entry = my_queue.get(timeout=1.0)
-                    print(f"Sending {log_entry=}")
+                    print(f"Message to client: {log_entry}", file=sys.stderr)
                     last_activity_time = time.time()
                     yield f"data: {log_entry}\n\n"
 
@@ -59,9 +60,9 @@ def make_queue(logger):
                         )
                     continue
         except GeneratorExit:
-            print("client closed logger")
+            print("client closed logger",file=sys.stderr)
         finally:
-            print("logger finished")
+            print("logger finished",file=sys.stderr)
     return generate_events
 
 progress = QueuePublisher()

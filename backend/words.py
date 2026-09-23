@@ -1,9 +1,16 @@
 import heapq
 import logging
+import sys
 import threading
+from collections import Counter
+from itertools import accumulate, groupby
 
 import phonemizer
 from rapidfuzz import fuzz
+
+from flask import current_app
+
+BLOCKNOS = 5.0 # Number to multiply score by for UI.
 
 phonemizer_lock = threading.Lock()
 
@@ -126,17 +133,126 @@ def mark_unlikely(words: list[dict]):
         words[lowest_word_idx]["unlikely"] = 1
 
 
+#Make minimal list to send to javascript: call this fn with map()
+def to_basiclist(x: dict) -> list:  # for each phoneme, record its text, score and length
+    return [x["text"], round(x["score"] * BLOCKNOS, 3), x["end"] - x["start"]]
+
+#Reverse of to_list: turn it back into a full list with starts and ends
+def unpack_phonlist( x: list[list]) -> list[dict]:
+    lengths = [item[2] for item in x]
+    ends = list(accumulate(lengths))
+    starts = [0] + ends[:-1]
+    result = [
+        {"text": item[0], "score": item[1] / BLOCKNOS, "start": start, "end": end}
+        for item, start, end in zip(x, starts, ends)
+    ]
+    return result
+
+
+def dipthong(d: str,phonemes:dict ) -> bool:
+    if " " in phonemes[d][1] :
+        current_app.logger.info(f"{d=} {phonemes[d][1]=}")
+    return " " in phonemes[d][1]
+
+#are sounds a and b a close match?
+def close_attempt(a:dict, b:dict,phonemes:dict) -> bool:  # a is correct, b is attempt
+
+    if a['text']=='' or b['text']=='':
+        return False
+    if a["score"] > b["score"]:
+        return False  # ignore a less likely attempt
+    ignore = ("long", "nasalized", "lowered", "r-coloured","schwa","unreleased")
+    # for description alternatives set =('voiced:[('voiceless','remove voicing')],
+    #                           'central',[('back','move back'),('front','move front')])
+    # take advantage of dictionary order correct vs attempt, construct description.
+    alternatives = (
+        "voiced",
+        "voiceless",
+        "close",
+        "close-mid",
+        "open",
+        "near-open",
+        "open-mid",
+        "rounded",
+        "unrounded",
+        "mid-central",
+        "front",
+        "central",
+        "back",
+    )
+    ap = a["text"] 
+    bp = b["text"]
+    if ap == bp or dipthong(ap,phonemes) or dipthong(bp,phonemes):
+        return False
+    
+    a_desc=phonemes[ap][2].split() # eg ['open','front','vowel']
+    b_desc=phonemes[bp][2].split()
+
+    attrs = Counter(b_desc)
+    attrs += Counter(a_desc)
+    current_app.logger.info(f"{attrs=}")
+    for i in attrs:
+        if attrs[i] == 1 and i not in ignore:
+            current_app.logger.info(f"{ap} {bp} {i}")
+            if i not in alternatives:
+                return False
+    return True
+
+
+def  create_tips(corr:list[dict],best:list[dict],raw:list[dict],phonemes:dict):
+    c = b = r = 0 
+    corr_len,best_len,raw_len=len(corr),len(best),len(raw)
+   
+    tips = []
+    now=0
+    #c_start=b_start=r_start=0
+    while c<corr_len or b<best_len or r<raw_len:
+   
+        current_app.logger.info(f" Comparing at time {now=}")
+  
+        c_inrange:bool=c<corr_len and corr[c]['start']<=now and corr[c]['end']>now
+        b_inrange=b<best_len and best[b]['start']<=now and best[b]['end']>now
+        r_inrange=r<raw_len and raw[r]['start']<=now and raw[r]['end']>now    
+
+        if c_inrange:
+            current_app.logger.info(f" corr = {corr[c]['text']}")
+        if b_inrange:
+            current_app.logger.info(f" best = {best[b]['text']}")
+        if r_inrange:
+            current_app.logger.info(f" raw = {raw[r]['text']}")
+        b_is_close=close_attempt(corr[c],best[b],phonemes) if b_inrange and c_inrange else False
+        if c_inrange and b_inrange and b_is_close:
+            attempt = raw[r]["text"] if r_inrange and close_attempt(corr[c], raw[r],phonemes) else best[b]["text"]
+            tips.append(f"Adjust your speech from {attempt} to {corr[c]['text']}")
+        elif ((not c_inrange or not b_is_close) and 
+                b_inrange and r_inrange and 
+                close_attempt(corr[c],raw[r],phonemes)):
+            tips.append(f"Your {corr[c]['text']} was more like {raw[r]['text']}")
+
+        c_end = corr[c]['end'] if c < corr_len else float("inf")
+        b_end = best[b]['end'] if b < best_len else float("inf")
+        r_end = raw[r]['end'] if r < raw_len else float("inf")
+        now=min([c_end,b_end,r_end])
+        if c_inrange and c_end==now:
+            c+=1 #  would not be valid if we had gaps 
+        if b_inrange and b_end==now:
+            b+=1
+        if r_inrange and r_end==now:
+            r+=1
+        
+    return [key for key, group in groupby(tips)] #dedupe tips
+
+#### Phonemizer -related functions
+
 trans = str.maketrans("", "", ":;/.,!\"'")
 
 def strip_punc(x: str) -> str:
-
-    return x.translate(trans)
+    return x.translate(trans) # strip the basics including commas - we might put commas back in as a last resort
 
 # phonemize_words: Uses phonemizer+espeak to convert text to phonemes,
 # where listof3=[prefix,text,suffix] to give the rest of the sentence as context.
 # We identify target text within espeak's output by word counting.
 # If we think this would fail due to espeak joining or splitting words, back off to inferior strategy.
-
 
 def phonemize_words(listof3: list[str], lang: str) -> str:
 
@@ -184,7 +300,7 @@ def phonemize_backoff(listof3: list[str], gen_lang: str) -> str:
             separator=phonemizer.separator.Separator(phone=" ", word="\t"),  # type: ignore
             preserve_punctuation=True,
         )
-    print("Backoff result: ", phn)
+    current_app.logger.info(f"Backoff result: {phn}")
     phn = phn.replace("\t", " ")
     l = phn.split(",")
     return l[1].strip()  # if needed can also return l[0] + l[1] + l[2]
@@ -195,7 +311,7 @@ def split_by_fuzzy_match(
 ) -> tuple[float, float]:
 
     target_end_idx = None
-    print(f" {words=} {prefix=} {suffix=}")
+    current_app.logger.info(f"Attempting fuzzy match {words=} {prefix=} {suffix=}")
     if prefix == "":
         start = words[0]["start"]
         target_start_idx = 0
@@ -223,14 +339,14 @@ def split_by_fuzzy_match(
         if target_end_idx == None:  # disastrous matching fail?
             target_end_idx = len(words) - 1  # perhaps user only spoke seg not sentence.
             logger=logging.getLogger("DAL")
+            print(f"Match failed: {match}",file=sys.stderr)
             logger.info("Could not match sentence")
         end = words[target_end_idx]["end"]
-        print(f"seg is between {target_start_idx} and {target_end_idx} in {words}")
+        current_app.logger.info(f"seg is between {target_start_idx} and {target_end_idx} in {words}")
     return start, end
 
-
+# Return surrounding words in the same sentence, given start and end time.
 def build_context(sent_idx: int, words: list, start_time: float, end_time: float):
-    # print(f" {sent_idx=} {words=}")
     sent_no = words[sent_idx]["sent"]
     i = sent_idx
     prefix: str = ""

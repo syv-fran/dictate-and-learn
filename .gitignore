@@ -25,3 +25,4 @@ backend/static/
 vuejs/README.md
 vuejs/eslint.config.js
 vuejs/public/
+.vitest/

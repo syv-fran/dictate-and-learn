@@ -17,7 +17,9 @@ export default defineConfig(({ mode }) => ({
     outDir: path.resolve(__dirname, '../backend/static'),
     emptyOutDir: false,
   }, 
-
+  test: {
+    environment: "jsdom",
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

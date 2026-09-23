@@ -1,4 +1,4 @@
-ARG NODE_VERSION=24.12.0-alpine
+ARG NODE_VERSION=alpine
 
 # Use a lightweight Node.js image for development
 FROM node:${NODE_VERSION} AS dev

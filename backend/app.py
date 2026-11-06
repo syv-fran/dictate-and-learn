@@ -29,12 +29,11 @@ import huggingface_hub  # needed for exception handling
 import numpy as np
 import torch
 import whisperx
+from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 from piper import PiperVoice as TTSVoice  # currently using Piper as TTS, could change.
 from werkzeug.utils import secure_filename
 from whisperx.audio import SAMPLE_RATE
-
-from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 from . import progresslog, speechfunc, tts, words
 
@@ -69,7 +68,7 @@ class RecogState: #this is the state of the current recognition task, shared bet
 @dataclass()
 class GlobalState: 
     # - global locks for functions which aren't thread-safe
-    # - anything constant, but loaded lazily.
+    # + anything constant, but loaded on demand.
     phonemes:dict = field(default_factory=dict)
     voice_lock: threading.Lock = field(default_factory=threading.Lock)
     phone_aligner: speechfunc.PhoneAligner | None = None
@@ -448,6 +447,7 @@ def letter_list():
             prefix, suffix = words.build_context(
                 state.sentence_idx[int(sent)], state.words, start, end
             )
+        app.logger.info(f" {prefix=} {suffix=}")
         phones = words.phonemize_words([prefix, text, suffix], state.lang)
         result = speechfunc.phone_align(
             start, phones, global_state.phone_aligner, emissions

@@ -6,9 +6,8 @@ from collections import Counter
 from itertools import accumulate, groupby
 
 import phonemizer
-from rapidfuzz import fuzz
-
 from flask import current_app
+from rapidfuzz import fuzz
 
 BLOCKNOS = 5.0 # Number to multiply score by for UI.
 
@@ -133,7 +132,7 @@ def mark_unlikely(words: list[dict]):
         words[lowest_word_idx]["unlikely"] = 1
 
 
-#Make minimal list to send to javascript: call this fn with map()
+#Make minimal phoneme list to send to javascript: call this fn with map()
 def to_basiclist(x: dict) -> list:  # for each phoneme, record its text, score and length
     return [x["text"], round(x["score"] * BLOCKNOS, 3), x["end"] - x["start"]]
 
@@ -224,8 +223,8 @@ def  create_tips(corr:list[dict],best:list[dict],raw:list[dict],phonemes:dict):
         if c_inrange and b_inrange and b_is_close:
             attempt = raw[r]["text"] if r_inrange and close_attempt(corr[c], raw[r],phonemes) else best[b]["text"]
             tips.append(f"Adjust your speech from {attempt} to {corr[c]['text']}")
-        elif ((not c_inrange or not b_is_close) and 
-                b_inrange and r_inrange and 
+        elif ((not b_is_close) and 
+                r_inrange and c_inrange and 
                 close_attempt(corr[c],raw[r],phonemes)):
             tips.append(f"Your {corr[c]['text']} was more like {raw[r]['text']}")
 

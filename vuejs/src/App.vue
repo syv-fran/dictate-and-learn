@@ -43,6 +43,7 @@ const isAnalyzing = ref(false);
 const isRecognizing = ref(false);
 
 const checked = ref(false); // just for testing.
+const provide_prefix = ref(true); //more testing
 const radioFullSentence = ref(false); // status of radio buttons
 
 const scrollContainer = ref(null); // vue language feature: initialises to element with ref scrollContainer
@@ -248,7 +249,7 @@ async function doRecog() {
   } catch (error) { addMessage(`Error submitting recognition: ${error.message}`) }
 }
 
-// called by button, runs recognition with audio already on server.
+// top level, called by button, runs recognition with audio already on server.
 async function makePreset() {
   try {
     const presetPath= `${APIHOST}/static/${PRESETFILE}`
@@ -409,7 +410,7 @@ function correctWordsList() { // add user's correction to word list
           wordsList.value[x].correction = correctText.value;
           doneWork = true;
         }
-        else
+        else  // put entire correction in first word. blank rest.
           wordsList.value[x].correction = '';
       }
     }
@@ -438,11 +439,15 @@ function mapBricks(letter, i) {
 }
 
 async function callAnalyze(text, l) {
-  //TODO: send through prefix and suffix as well?
-  
+
   const url = new URL(`${APIHOST}/analyze`);
   url.searchParams.set('start', currentSeg.value.start);
-  url.searchParams.set('end', currentSeg.value.end);
+  url.searchParams.set('end', currentSeg.value.end); 
+  if (provide_prefix.value) {
+    url.searchParams.set('useprefixes',true); 
+    url.searchParams.set("prefix", prefix.value);
+    url.searchParams.set("suffix", suffix.value);
+} 
   if (!currentSeg.value.isRetry) {
     url.searchParams.set('sent', currentSent);
   }
@@ -510,7 +515,7 @@ async function getLetters() {
   finally {
     isAnalyzing.value = false;
   } 
-}
+} 
 
 async function callRetry() {
   //ensure text messages are arriving at log file before we ask to do recognition (avoid race)
@@ -852,7 +857,11 @@ function linkDictionary(ph, index, struct, idPrefix) {
     </div>
     <div class="form-check">
       <input id="checkbox" v-model="checked" type="checkbox" />
-      <label for="checkbox">{{ checked }}</label>
+      <label for="checkbox">Beam search test {{ checked }}</label>
+    </div>
+    <div class="form-check">
+      <input id="checkbox" v-model="provide_prefix" type="checkbox" />
+      <label for="checkbox">Test provide prefix {{ provide_prefix }}</label>
     </div>
   </div>
   <!---- PROGRESS LOG PANEL ---->
